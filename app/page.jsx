@@ -56,6 +56,9 @@ const BRIDGE_METHODS = [
 // Real cookie names are lowercase; matched case-insensitively below.
 const HIGHLIGHT = ['access_token', 'refresh_token', 'pin_token', 'x-device-signature', 'hashed_email'];
 const VERSION_COOKIE_KEYS = ['app_version', 'APP_VERSION', 'appVersion', 'version', 'VERSION'];
+// Non-secret device/app metadata the app sets as plain cookies. Case-sensitive
+// keys, displayed in full (these are not credentials, so not truncated).
+const DEVICE_COOKIE_KEYS = ['APP_VERSION', 'OS', 'x-product', 'x-platform', 'theme', 'x-device-name'];
 
 // Entry-point objects we check by name, with the method names we expect to see.
 // Reflection reveals the real exposed methods live; the heuristic scan below
@@ -245,6 +248,7 @@ function detectPlatform() {
 export default function Page() {
   const [host, setHost] = useState('');
   const [href, setHref] = useState('');
+  const [proto, setProto] = useState('');
   const [cookies, setCookies] = useState([]);
   const [bridges, setBridges] = useState({ known: [], extra: [], ios: { present: false, handlers: [] } });
   const [platform, setPlatform] = useState('');
@@ -257,6 +261,7 @@ export default function Page() {
   const tokenProbed = useRef(false); // guard: REFRESH_ACCESS_TOKEN runs at most once
   const pollRef = useRef(null); // interval polling for window.AndroidBridge
   const timeoutRef = useRef(null); // callback-didn't-fire timeout
+  const mediaTimeoutRef = useRef(null); // enumerateDevices settle timeout
 
   useEffect(() => {
     // Each read is independently guarded so one failure cannot blank the page.
@@ -273,13 +278,21 @@ export default function Page() {
     } catch {
       /* ignore */
     }
+    try {
+      setProto(window.location.protocol);
+    } catch {
+      /* ignore */
+    }
 
     // --- Cookies (plain name=value, readable via document.cookie) ---
     try {
       const parsed = readCookies();
       setCookies(parsed);
       try {
-        const vk = parsed.find((c) => VERSION_COOKIE_KEYS.includes(c.name));
+        // Footer app version: prefer the exact APP_VERSION cookie, then fall
+        // back to other common version key spellings.
+        const exact = parsed.find((c) => c.name === 'APP_VERSION');
+        const vk = exact || parsed.find((c) => VERSION_COOKIE_KEYS.includes(c.name));
         if (vk) setAppVersion(vk.value || '(empty)');
       } catch {
         /* ignore */
@@ -420,24 +433,51 @@ export default function Page() {
 
     // --- Media reach: enumerateDevices only. getUserMedia is NEVER called. ---
     try {
-      if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        setMediaError('mediaDevices unavailable');
+      } else {
+        let settled = false;
+        // ~5s timeout: if neither then/catch fires, report it instead of
+        // leaving the card stuck on "probing…". Cleared when either settles.
+        try {
+          mediaTimeoutRef.current = setTimeout(() => {
+            if (!settled) setMediaError('enumerate timed out');
+          }, 5000);
+        } catch {
+          /* ignore */
+        }
+        const clearMediaTimeout = () => {
+          settled = true;
+          try {
+            if (mediaTimeoutRef.current) {
+              clearTimeout(mediaTimeoutRef.current);
+              mediaTimeoutRef.current = null;
+            }
+          } catch {
+            /* ignore */
+          }
+        };
         navigator.mediaDevices
           .enumerateDevices()
           .then((devices) => {
+            clearMediaTimeout();
             try {
               setMediaDevices(
                 devices.map((d) => ({
                   kind: d.kind,
-                  label: d.label || '(label withheld until permission granted)',
+                  // Labels are empty without an active stream; say so rather
+                  // than imply a value was withheld by permission alone.
+                  label: d.label || '(label empty — no active stream / permission)',
                 })),
               );
             } catch (e) {
               setMediaError(String(e && e.message ? e.message : e));
             }
           })
-          .catch((e) => setMediaError(String(e && e.message ? e.message : e)));
-      } else {
-        setMediaError('navigator.mediaDevices.enumerateDevices is unavailable');
+          .catch((e) => {
+            clearMediaTimeout();
+            setMediaError(String(e && e.message ? e.message : e));
+          });
       }
     } catch (e) {
       setMediaError(String(e && e.message ? e.message : e));
@@ -451,6 +491,11 @@ export default function Page() {
       }
       try {
         if (pollRef.current) clearInterval(pollRef.current);
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (mediaTimeoutRef.current) clearTimeout(mediaTimeoutRef.current);
       } catch {
         /* ignore */
       }
@@ -479,12 +524,18 @@ export default function Page() {
           <span className="k">location.href</span> = {href || '(unknown)'}
         </div>
         <div className="kv">
+          <span className="k">location.protocol</span> = {proto || '(unknown)'}
+        </div>
+        <div className="kv">
           <span className="k">detected runtime</span> = {platform || '(detecting…)'}
         </div>
       </section>
 
       {/* Cookies */}
       <CookiesCard cookies={cookies} />
+
+      {/* App + device metadata cookies */}
+      <DeviceInfoCard cookies={cookies} />
 
       {/* Bridge entry points — live reflection */}
       <section className="card risk">
@@ -663,6 +714,33 @@ function CookiesCard({ cookies }) {
       {hasAccessToken ? (
         <div className="alert">Session token readable by this third-party origin.</div>
       ) : null}
+    </section>
+  );
+}
+
+// App + device metadata the app writes as plain cookies. Read from the parsed
+// document.cookie only (case-sensitive keys). Non-secret, so shown in full.
+function DeviceInfoCard({ cookies }) {
+  const byName = (name) => cookies.find((c) => c.name === name);
+  const rows = DEVICE_COOKIE_KEYS.map((key) => ({ key, cookie: byName(key) })).filter(
+    (r) => r.cookie,
+  );
+  return (
+    <section className="card">
+      <h2>App &amp; device metadata (cookies)</h2>
+      <p className="label">
+        Read from document.cookie. Case-sensitive keys; non-secret device/app values, shown in full.
+      </p>
+      {rows.length === 0 ? (
+        <div className="note">None of the expected device cookies are present on this origin.</div>
+      ) : (
+        rows.map(({ key, cookie }) => (
+          <div className="row" key={key}>
+            <span className="name">{key}</span>
+            <span className="val">{cookie.value || '(empty)'}</span>
+          </div>
+        ))
+      )}
     </section>
   );
 }
