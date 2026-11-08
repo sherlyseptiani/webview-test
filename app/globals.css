@@ -1,0 +1,215 @@
+:root {
+  --bg: #f4f5f7;
+  --card: #ffffff;
+  --card-border: #d9dce1;
+  --text: #15181d;
+  --muted: #5b6370;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --risk-bg: #fff4f3;
+  --risk-border: #e0483b;
+  --risk-text: #a11a10;
+
+  --warn-bg: #fff8e6;
+  --warn-border: #d9a300;
+
+  --ok: #1a7f46;
+  --chip-bg: #eef0f3;
+  --chip-text: #3a414c;
+
+  --banner-bg: #2a0e0c;
+  --banner-text: #ffdedb;
+  --banner-accent: #ff6a5c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d0f12;
+    --card: #15181d;
+    --card-border: #2a2f37;
+    --text: #e8eaed;
+    --muted: #9aa3b0;
+
+    --risk-bg: #2a100d;
+    --risk-border: #ff5648;
+    --risk-text: #ff9c92;
+
+    --warn-bg: #2a2306;
+    --warn-border: #d9a300;
+
+    --ok: #58d08a;
+    --chip-bg: #22272f;
+    --chip-text: #c3cad4;
+
+    --banner-bg: #2a0e0c;
+    --banner-text: #ffdedb;
+    --banner-accent: #ff6a5c;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 16px 16px 64px;
+}
+
+.disclaimer {
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px dashed var(--card-border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 16px;
+}
+
+.banner {
+  background: var(--banner-bg);
+  color: var(--banner-text);
+  border-left: 6px solid var(--banner-accent);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 20px;
+}
+
+.banner h1 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  line-height: 1.35;
+  color: #fff;
+}
+
+.banner .kv {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  word-break: break-all;
+  margin: 2px 0;
+}
+
+.banner .kv span.k { color: var(--banner-accent); }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.card.risk {
+  background: var(--risk-bg);
+  border: 1px solid var(--risk-border);
+  border-left: 6px solid var(--risk-border);
+}
+
+.card h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.card .label {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 0 0 12px;
+}
+
+.card.risk .label { color: var(--risk-text); }
+
+.alert {
+  font-weight: 600;
+  color: var(--risk-text);
+  background: rgba(224, 72, 59, 0.1);
+  border-radius: 6px;
+  padding: 6px 10px;
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--card-border);
+  font-size: 13px;
+}
+.row:last-child { border-bottom: none; }
+
+.row .name { font-weight: 600; word-break: break-all; }
+.row .val { font-family: var(--mono); color: var(--muted); word-break: break-all; text-align: right; }
+
+.row.flag .name { color: var(--risk-text); }
+.row.flag { background: rgba(224, 72, 59, 0.06); border-radius: 4px; padding-left: 6px; padding-right: 6px; }
+
+.chip {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  border-radius: 5px;
+  padding: 2px 7px;
+  margin: 2px 4px 2px 0;
+}
+
+.expect {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+
+.status-ok { color: var(--ok); font-weight: 600; }
+.status-bad { color: var(--risk-text); font-weight: 600; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 8px;
+}
+th, td {
+  text-align: left;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--card-border);
+  vertical-align: top;
+}
+th { color: var(--muted); font-weight: 600; }
+td.name { font-family: var(--mono); font-weight: 600; }
+
+tr.cat-Session td.name, tr.cat-Signing td.name { color: var(--risk-text); }
+tr.cat-Session, tr.cat-Signing { background: rgba(224, 72, 59, 0.06); }
+
+.cat-tag {
+  display: inline-block;
+  font-size: 11px;
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: var(--chip-bg);
+  color: var(--chip-text);
+}
+
+.note {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+
+.footer {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 24px;
+  padding-top: 12px;
+  border-top: 1px solid var(--card-border);
+}
